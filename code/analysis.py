@@ -5,31 +5,37 @@ import dask
 import dask
 import time
 import itertools
-from dask.distributed import Client, progress
-from gensim.parsing.preprocessing import strip_non_alphanum, remove_stopwords
+from dask.distributed import Client
 from gensim.summarization.textcleaner import get_sentences
 from gensim.parsing.preprocessing import preprocess_string
 from gensim.parsing.preprocessing import strip_tags, strip_punctuation, \
     strip_multiple_whitespaces, strip_numeric, \
-    remove_stopwords, strip_short, stem_text, strip_non_alphanum
+    remove_stopwords, strip_short, strip_non_alphanum
 from collections import OrderedDict
 from gensim.models import Word2Vec
 from gensim.models.callbacks import CallbackAny2Vec
 import csv
 from itertools import islice
-from multiprocessing import Process, Pipe, Pool
-import matplotlib as plt
+from multiprocessing import Pool
+import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.manifold import TSNE
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
 
 # to see size on disk of directories
 # du -shc ./*
 # ls -l ./biorxiv_medrxiv/ | egrep -c '^-'
 
 paths_to_json = ['/home/ankur/dev/apps/ML/Covid 19/comm_use_subset/comm_use_subset',
-                '/home/ankur/dev/apps/ML/Covid 19/noncomm_use_subset/noncomm_use_subset',
-                '/home/ankur/dev/apps/ML/Covid 19/biorxiv_medrxiv',
+                 '/home/ankur/dev/apps/ML/Covid 19/noncomm_use_subset/noncomm_use_subset',
+                 '/home/ankur/dev/apps/ML/Covid 19/biorxiv_medrxiv',
                  '/home/ankur/dev/apps/ML/Covid 19/custom_license/custom_license']
+
+json_files = []
+for path_to_json in paths_to_json:
+    for file in os.listdir(path_to_json):
+        if file.endswith('.json'):
+            json_files.append(os.path.join(path_to_json, file))
 
 CUSTOM_FILTERS = [
     lambda x: x.lower(), strip_tags, strip_punctuation,
@@ -47,6 +53,7 @@ def grouper(n, it):
     "grouper(3, 'ABCDEFG') --> ABC DEF G"
     it = iter(it)
     return iter(lambda: list(itertools.islice(it, n)), [])
+
 
 class EpochLogger(CallbackAny2Vec):
     '''Callback to log information about training'''
@@ -103,11 +110,11 @@ def get_data(articles):
             sentences.append(preprocess_string(sentence, CUSTOM_FILTERS))
         id2abstract.update({id: abstract})
         id2title.update({id: title})
-        id2authors.update({id:authors})
+        id2authors.update({id: authors})
     return [id2abstract, id2title, id2authors, sentences]
 
 
-
+# Reads the contents of json files in files list
 def read_json_file(files):
     contents = []
     for file in files:
@@ -117,13 +124,6 @@ def read_json_file(files):
     return contents
 
 
-json_files = []
-for path_to_json in paths_to_json:
-    for file in os.listdir(path_to_json):
-        if file.endswith('.json'):
-            json_files.append(os.path.join(path_to_json, file))
-
-
 def preprocess_data(client):
     articles = []
     # with dask
@@ -131,7 +131,7 @@ def preprocess_data(client):
     workers = scheduler_info['workers']
     num_workers = len(workers)
     num_articles = 1000
-    block_size = int(num_articles/num_workers)
+    block_size = int(num_articles / num_workers)
     dask.config.set({'distributed.worker.memory.spill': False})
 
     # without dask
@@ -172,6 +172,7 @@ def preprocess_data(client):
     # write_to_file('sentences.csv', sentences, '\t')
     return sentences
 
+
 # data must be list of dictionaries
 def write_to_file(filename, data, delimiter='\t'):
     with open(filename, "w") as f:
@@ -183,6 +184,7 @@ def write_to_file(filename, data, delimiter='\t'):
             wr.writerows(data)
         # otherwise, unsupported data structure
 
+
 # for reading sentences. Returns list of words in a sentence
 def read_from_file(filename, delimiter='\t'):
     with open(filename, newline='') as f:
@@ -190,18 +192,16 @@ def read_from_file(filename, delimiter='\t'):
         data = list(reader)
         return data
 
+
 # for reading titles and abstracts, returns dictionary
 def read_from_file2(filename, delimiter='\t'):
     with open(filename, mode='r') as infile:
         reader = csv.reader(infile, delimiter=delimiter)
-        mydict = {rows[0]:rows[1] for rows in reader}
+        mydict = {rows[0]: rows[1] for rows in reader}
     return mydict
 
-def display_closestwords_tsnescatterplot(model, word, dim = 128, num_closest = 50):
-    import numpy as np
-    from sklearn.manifold import TSNE
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
+
+def display_closestwords_tsnescatterplot(model, word, dim=128, num_closest=50):
 
     arr = np.empty((0, dim), dtype='f')
     word_labels = [word]
@@ -244,15 +244,16 @@ def display_closestwords_tsnescatterplot(model, word, dim = 128, num_closest = 5
 
 # creates a word2vec model using gensim using combination of parameters
 def create_model(client):
-
     iter = 20
     sg = 0
     dim = 128
     sentences = preprocess_data(client)
     sentences = read_from_file('sentences.csv')
     epoch_logger = EpochLogger()
-    model = Word2Vec(sentences=sentences, workers=8, size=dim, compute_loss=True, iter=iter, sg=sg, callbacks=[epoch_logger])
+    model = Word2Vec(sentences=sentences, workers=8, size=dim, compute_loss=True, iter=iter, sg=sg,
+                     callbacks=[epoch_logger])
     model.save('covid19_w2v_gensim_iter={0}_sg={1}_dim={2}.model'.format(iter, sg, dim))
+
 
 def compute_wmd(model, target, dict_):
     scores = []
@@ -263,27 +264,31 @@ def compute_wmd(model, target, dict_):
             scores.append({k: score})
     return scores
 
+
 def aux(args):
     return compute_wmd(*args)
+
 
 def chunks(data, SIZE=10000):
     it = iter(data)
     for i in range(0, len(data), SIZE):
-        yield {k:data[k] for k in islice(it, SIZE)}
+        yield {k: data[k] for k in islice(it, SIZE)}
+
 
 def use_model(client):
     titles = read_from_file2('titles.csv')
     # load models
     iter = 20
     sg = 1
-    model = Word2Vec.load('covid19_w2v_gensim_iter={0}_sg={1}.model'.format(iter, sg))
+    dim = 128
+
+    model = Word2Vec.load('covid19_w2v_gensim_iter={0}_sg={1}_dim={2}.model'.format(iter, sg, dim))
     target_title = "antibiotics Combating Antimicrobial Resistance in Singapore: A Qualitative Study Exploring the Policy Context, Challenges, Facilitators, and Proposed Strategies"
 
     target_title_processed = preprocess_string(target_title, CUSTOM_FILTERS)
-    scores = {}
     n = 3000
     # titles = dict(take(n, titles.items()))
-    chunk_size = int(len(titles)/10)
+    chunk_size = int(len(titles) / 10)
     scores = []
     start = time.time()
     args = []
@@ -339,11 +344,10 @@ def main(client):
     use_model(client)
     print('good')
 
-if __name__== "__main__":
-    client = Client(threads_per_worker=1, n_workers=10)
-    #client.cluster.scale(5)
-    main(client)
 
+if __name__ == "__main__":
+    client = Client(threads_per_worker=1, n_workers=10)
+    main(client)
 
     # this code attempts to use dask to parallelize data preprocessing
     '''
