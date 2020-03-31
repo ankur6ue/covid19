@@ -75,6 +75,27 @@ class EpochLogger(CallbackAny2Vec):
         self.epoch += 1
 
 
+def consolidate_text(blob):
+    # convert: "check out these cool references [1][2]" ->
+    # "check out these cool references
+    consolidated_text = ""
+    for item in blob:
+        cite_spans = item['cite_spans']
+        ref_spans = item['ref_spans']
+        text = item['text']
+        for cite_span in cite_spans:
+            strip_text = cite_span['text']
+            # can't use string.strip, because it only strips characters at the beginning and end of a string!
+            text = text.replace(strip_text, '')
+        for ref_span in ref_spans:
+            strip_text = ref_span['text']
+            # can't use string.strip, because it only strips characters at the beginning and end of a string!
+            text = text.replace(strip_text, '')
+        consolidated_text = consolidated_text + text
+    return consolidated_text
+
+# parses the article json, applies text filters to the blocks of body text and returns dictionaries
+# for titles, abstracts, authors and a list of sentences
 def get_data(articles):
     # document id -> abstract
     id2abstract = {}
@@ -86,28 +107,14 @@ def get_data(articles):
     sentences = []
     for article in articles:
         id = article['paper_id']
-        abstract = article['abstract']
         title = article['metadata']['title']
         authors = article['metadata']['authors']
-        bodytext = ''
-        # convert: "check out these cool references [1][2]" ->
-        # "check out these cool references
-        for item in article['body_text']:
-            cite_spans = item['cite_spans']
-            ref_spans = item['ref_spans']
-            text = item['text']
-            for cite_span in cite_spans:
-                strip_text = cite_span['text']
-                # can't use string.strip, because it only strips characters at the beginning and end of a string!
-                text = text.replace(strip_text, '')
-            for ref_span in ref_spans:
-                strip_text = ref_span['text']
-                # can't use string.strip, because it only strips characters at the beginning and end of a string!
-                text = text.replace(strip_text, '')
-            bodytext = bodytext + text
+        bodytext = consolidate_text(article['body_text'])
+        abstract = consolidate_text(article['abstract'])
         # preprocess - apply custom filters listed above
         for sentence in get_sentences(bodytext):
             sentences.append(preprocess_string(sentence, CUSTOM_FILTERS))
+        # should probably apply custom filters to the abstract as well..
         id2abstract.update({id: abstract})
         id2title.update({id: title})
         id2authors.update({id: authors})
@@ -130,15 +137,13 @@ def preprocess_data(client):
     scheduler_info = client.scheduler_info()
     workers = scheduler_info['workers']
     num_workers = len(workers)
-    num_articles = 1000
-    block_size = int(num_articles / num_workers)
     dask.config.set({'distributed.worker.memory.spill': False})
 
     # without dask
     articles = []
     num_files = 0
     start = time.time()
-    for file in json_files[0:100]:
+    for file in json_files:
         articles.append(*read_json_file([file]))
         print('reading file: {0}'.format(num_files))
         num_files = num_files + 1
@@ -147,29 +152,38 @@ def preprocess_data(client):
 
     # in case we want to only process a subset of articles
     num_articles = len(articles)
-    articles_ = articles[0:num_articles]
-    # conclusion: even with grouping, reading data from the disk in "parallel" using DASK takes longer than serial read.
-
     id2abstract = {}
     id2title = {}
     id2authors = {}
     sentences = []
     start = time.time()
     num = 0
-    for article in articles_:
-        id2abstract_, id2title_, id2authors_, sentences_ = get_data([article])
-        id2abstract.update(id2abstract_)
-        id2title.update(id2title_)
-        id2authors.update(id2authors_)
-        print('processing article #{0}'.format(num))
-        num = num + 1
-        for item in sentences_:
-            sentences.append(item)
+    # distribute out the process of parsing articles
+    num_proc = 10 # should be a bit less the number of cores on your machine
+    block_size = int(num_articles / num_proc)
+    groups = list(grouper(block_size, articles))
+    start = time.time()
+
+    args = []
+    for group in groups:
+        args.append([group])
+
+    # distribute out parsing the articles to a pool of processes
+    with Pool(num_proc) as p:
+        data = p.map(aux1, args)
+
+    for item in data:
+        id2abstract.update(item[0])
+        id2title.update(item[1])
+        id2authors.update(item[2])
+        for item_ in item[3]:
+            sentences.append(item_)
+
     print('load time without dask: {0}'.format(time.time() - start))
 
-    # write_to_file('titles.csv', id2title, '\t')
-    # write_to_file('abstracts.csv', id2abstract, '\t')
-    # write_to_file('sentences.csv', sentences, '\t')
+    write_to_file('titles.csv', id2title, '\t')
+    write_to_file('abstracts.csv', id2abstract, '\t')
+    write_to_file('sentences.csv', sentences, '\t')
     return sentences
 
 
@@ -265,8 +279,12 @@ def compute_wmd(model, target, dict_):
     return scores
 
 
-def aux(args):
+def aux2(args):
     return compute_wmd(*args)
+
+
+def aux1(args):
+    return get_data(*args)
 
 
 def chunks(data, SIZE=10000):
@@ -298,7 +316,7 @@ def use_model(client):
         args.append([model, target_title_processed, item])
 
     with Pool(10) as p:
-        scores_ = p.map(aux, args)
+        scores_ = p.map(aux2, args)
 
     scores = [items for item in scores_ for items in item]
     print('wmd compute time with multiprocessing: {0}'.format(time.time() - start))
@@ -340,13 +358,13 @@ def use_model(client):
 
 
 def main(client):
-    # create_model(client)
+    create_model(client)
     use_model(client)
     print('good')
 
 
 if __name__ == "__main__":
-    client = Client(threads_per_worker=1, n_workers=10)
+    client = Client(threads_per_worker=1, n_workers=1)
     main(client)
 
     # this code attempts to use dask to parallelize data preprocessing
